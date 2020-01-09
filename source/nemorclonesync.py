@@ -7,12 +7,13 @@ import re
 import os
 import subprocess
 import copy
+import sys
 from abc import ABCMeta, abstractmethod
 
 #-----[ Constants ]------------------------------------------------
 PLUGIN_NAME = "NemoRcloneSyncProvider"
 PLUGIN_TITLE = "Nemo Rclone Sync"
-VERSION = 1
+VERSION = 2
 DEFAULT_META_OBJECT = {
     "version": VERSION,
     "first_sync": True,
@@ -26,7 +27,11 @@ RCLONE_SYNC = "/usr/local/bin/rclonesync"
 RCLONE_SYNC_FILTERS_FILE = "/tmp/rclonesync-filters"
 RCLONE_SYNC_FILTERS_FILE_CONTENTS = "- .rclonesync/"
 
-DEBUG = True
+DEBUG = False
+
+PYTHON3 = False
+if sys.version_info[0] == 3:
+    PYTHON3 = True
 
 #===================================================================
 
@@ -85,12 +90,18 @@ class GAsyncSpawn(GObject.GObject):
     
     def _on_stdout(self, fobj, cond):
         if not fobj.closed:
-            self._emit_std("stdout", fobj.readline())
+            line = fobj.readline()
+            if (isinstance(line, bytes)): #This adds compatibility between python 2 and 3
+                line = str(line.decode("utf-8"))
+            self._emit_std("stdout", line)
         return True #IO Watch will continue looking for more lines
 
     def _on_stderr(self, fobj, cond):
         if not fobj.closed:
-            self._emit_std("stderr", fobj.readline())
+            line = fobj.readline()
+            if (isinstance(line, bytes)): #This adds compatibility between python 2 and 3
+                line = str(line.decode("utf-8"))
+            self._emit_std("stderr", line)
         return True #IO Watch will continue looking for more lines
 
 #-----[ FolderPath ]------------------------------------------------
@@ -242,15 +253,17 @@ class RclonePathBrowserProvider(PathBrowserProvider):
 
     def get_path_contents(self, path):
         #Run the rclone "list directories" command with a 5 second timeout
-        out = subprocess.Popen([RCLONE,'lsd',"--contimeout=5s",str(path)], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        #The lsf command was added in rclone 1.48 and outputs files/folders in an easy-to-parse format
+        out = subprocess.Popen([RCLONE,'lsf',"--contimeout=5s","--dirs-only",str(path)], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         stdout,stderr = out.communicate()
 
         if out.returncode == 0: #Success
             listing = stdout.splitlines()
             dirs = []
             for l in listing:
-                s = re.search(r'.*-1\s(.*)', l)
-                dirs.append(s.group(1))
+                if (isinstance(l, bytes)): #This adds compatibility between python 2 and 3
+                    l = str(l.decode("utf-8"))
+                dirs.append(l[:-1])
 
             return dirs
         else: #Error
@@ -433,6 +446,7 @@ class NemoRcloneSyncProviderDialog(Gtk.Dialog):
         Gtk.Dialog.__init__(self, "Choose Other Sync Path", parent, 0, (Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK))
 
         self.set_default_size(500, 450)
+        self.set_keep_above(True)
 
         self.pathProviders = {}
 
@@ -481,7 +495,7 @@ class NemoRcloneSyncProviderDialog(Gtk.Dialog):
 
     def on_remotebutton_clicked(self, button):
         if button:
-            if self.pathProviders.has_key(button.get_label()):
+            if button.get_label() in self.pathProviders:
                 provider = self.pathProviders[button.get_label()]
                 self.pathBrowserWidget.set_path_provider(provider)
 
@@ -489,8 +503,17 @@ class NemoRcloneSyncProviderDialog(Gtk.Dialog):
         out = subprocess.Popen([RCLONE,'listremotes'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
         stdout,stderr = out.communicate()
 
-        remotes = stdout.splitlines()
-        return [x[:-1] for x in remotes]
+        if out.returncode == 0: #Success
+            remotes = stdout.splitlines()
+            remotes_out = []
+            for r in remotes:
+                if (isinstance(r, bytes)): #This adds compatibility between python 2 and 3
+                    r = str(r.decode("utf-8"))
+                if r[-1] == ":":
+                    remotes_out.append(r[:-1])
+            return remotes_out
+        else:
+            return []
 
 #-----[ Sync Status Dialog ]---------------------------------------
 
@@ -500,9 +523,10 @@ class NemoRcloneSyncProviderDialog(Gtk.Dialog):
 
 class RcloneSyncStatusDialog(Gtk.Dialog):
     def __init__(self, parent):
-        Gtk.Dialog.__init__(self, "Synching...", parent, 0)
+        Gtk.Dialog.__init__(self, "Syncing...", parent, 0)
 
         self.set_default_size(800, 500)
+        self.set_keep_above(True)
 
         scrolledWindow = Gtk.ScrolledWindow()
         self.buffer = Gtk.TextBuffer()
@@ -545,9 +569,9 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
         self.spawn.connect("stderr-data", self.on_stdout_data)
 
     #-----[ Event Callbacks ]--------------------------------------------------
-    def on_menu_other_activated(self, menu, folder):
+    def on_menu_other_activated(self, menu, parent, folder):
         #Display the remote folder selection dialog
-        dialog = NemoRcloneSyncProviderDialog(None)
+        dialog = NemoRcloneSyncProviderDialog(parent)
         resp = dialog.run()
 
         #A path was selected
@@ -557,20 +581,20 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
             #Update the metadata file to save this path for future use
             if not self.meta_object_cache:
                 self.meta_object_cache = DEFAULT_META_OBJECT
-            if not self.meta_object_cache.has_key("places"):
+            if not "places" in self.meta_object_cache:
                 self.meta_object_cache["places"] = []
 
             self.meta_object_cache["places"].append({"label":label, "path":str(path)})
             self.write_meta_file(folder, self.meta_object_cache)
 
             #Start a sync using the selected remote
-            self.on_sync_requested(None, str(folder), str(path))
+            self.on_sync_requested(None, parent, str(folder), str(path), self.meta_object_cache["first_sync"])
 
         dialog.destroy()
         return
 
-    def on_sync_requested(self, menu, folder1, folder2, first_sync=False):
-        if DEBUG: print PLUGIN_NAME,":: Synching:",folder1,"and",folder2
+    def on_sync_requested(self, menu, parent, folder1, folder2, first_sync=False):
+        if DEBUG: print(PLUGIN_NAME,":: Syncing:",folder1,"and",folder2)
 
         #Create a temporary filters_file for rclonesync if one does not already exist
         if not os.path.isfile(RCLONE_SYNC_FILTERS_FILE):
@@ -593,7 +617,7 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
         #Open dialog to display real-time command status
         if self.syncDialog:
             self.syncDialog.destroy()
-        self.syncDialog = RcloneSyncStatusDialog(None)
+        self.syncDialog = RcloneSyncStatusDialog(parent)
         self.syncDialog.show()
 
         self.syncDialog.print_line("RUNNING: " + " ".join(args) + "\n\n")
@@ -602,7 +626,7 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
         self.spawn.run(args)
 
     def on_process_done(self, sender, retval):
-        if DEBUG: print PLUGIN_NAME,":: rclonesync has finished with the return value", retval
+        if DEBUG: print(PLUGIN_NAME, ":: rclonesync has finished with the return value", retval)
 
         self.syncDialog.print_line("DONE!\n")
         self.syncDialog.set_ok_enabled(True)
@@ -643,12 +667,14 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
             json_data = json.load(f) #Attempt to read JSON data from file
             f.close()
             
-            if json_data['version'] == VERSION:
-                return json_data
-            else:
-                return DEFAULT_META_OBJECT
+            return json_data
+
+            #if json_data['version'] == VERSION:
+            #    return json_data
+            #else:
+            #    return DEFAULT_META_OBJECT
         except Exception as e:
-            if DEBUG: print PLUGIN_NAME,"::Error reading meta file at:",meta_filename,"->",str(e)
+            if DEBUG: print(PLUGIN_NAME,"::Error reading meta file at:",meta_filename,"->",str(e))
             return DEFAULT_META_OBJECT
 
     def write_meta_file(self, folder, meta_object):
@@ -659,7 +685,7 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
             json.dump(meta_object, f)
             f.close()
         except Exception as e:
-            if DEBUG: print PLUGIN_NAME,"::",str(e)
+            if DEBUG: print(PLUGIN_NAME,"::",str(e))
 
     #-----[ Nemo Hooks ]----------------------------------------------------------
     def get_file_items(self, window, files):
@@ -671,7 +697,7 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
             return
 
         #Get the full system path of the selected folder
-        folder_uri = urllib.unquote(folder.get_uri()[7:])
+        folder_uri = urllib.parse.unquote(folder.get_uri()[7:]) if PYTHON3 else urllib.unquote(folder.get_uri()[7:])
         folder_name = os.path.basename(os.path.normpath(folder_uri))
 
         #Prevents recursion issues
@@ -692,18 +718,17 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
             self.meta_object_cache = self.read_meta_file(folder_uri) #Get the sync metadata (if any) for this folder
             self.last_dir = folder_uri
         
-        if self.meta_object_cache.has_key("places"):
+        if "places" in self.meta_object_cache:
             places = self.meta_object_cache["places"]
             for p in places:
                 #Create a new menu item for every remote path
-                if p.has_key("label") and p.has_key("path"):
+                if ("label" in p) and ("path" in p):
                     sub_menuitem = Nemo.MenuItem(name=PLUGIN_NAME + "::Place-" + p["label"],
                                      label=p["label"],
                                      tip='Sync to this remote directory',
                                      icon='folder')
 
-                    first_sync = self.meta_object_cache["first_sync"]
-                    sub_menuitem.connect('activate', self.on_sync_requested, str(folder_uri), str(p["path"]), first_sync)
+                    sub_menuitem.connect('activate', self.on_sync_requested, window, str(folder_uri), str(p["path"]), self.meta_object_cache["first_sync"])
 
                     submenu.append_item(sub_menuitem)
 
@@ -716,7 +741,7 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
                                      label='Other...',
                                      tip='Choose a destination directory not listed here',
                                      icon='folder-saved-search')
-        sub_menuitem.connect('activate', self.on_menu_other_activated, folder_uri)
+        sub_menuitem.connect('activate', self.on_menu_other_activated, window, folder_uri)
         submenu.append_item(sub_menuitem)
 
         return top_menuitem,

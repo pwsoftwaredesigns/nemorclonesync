@@ -1,0 +1,23 @@
+-------------------------------------------------------------------------------
+|        README
+|       nemorclonesync
+-------------------------------------------------------------------------------
+
+nemorclonesync is a Python extension for the Nemo file manager which is native
+to the Linux Mint/Cinammon desktop.  The extensions is built upon
+nemo-python, rclonesync v2, and rclone.  rclonesync v2 is a Python script
+developed to provide a robust and simple method to synchronize two folders
+using rclone.
+
+When installed, this plugin adds a new "sync" item to the context menu of
+folders when right-clicked within Nemo.  Under this item will be a list
+of previously synchonized folders for easy access and an option to choose
+any other folder from either the local filesystem or an rclone remote.
+
+In order to use rclone remotes, you must first configure them using the
+rclone program from the comannd line via "rclone config" or by using
+a 3rd party GUI for rclone.
+
+PACKAGES
+To build a DEB package, run the command "dpkg-deb --build [folder name]" from
+within the "packages" directory.

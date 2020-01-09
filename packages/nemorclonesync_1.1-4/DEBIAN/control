@@ -1,0 +1,14 @@
+Package: nemorclonesync
+Version: 1.1-4
+Section: base
+Priority: optional
+Architecture: all
+Depends: nemo, python (>= 2.7.0), rclone (>= 1.48.0), nemo-python|python-nemo
+Maintainer: Patrick Wright <pwsoftwaredesigns@gmail.com>
+Description: Nemo Rclone Sync Extension
+ This is a python plugin for the Nemo File Manager
+ which allows folders to be easily synchronized
+ to remotes (or the local filesystem) using the
+ rclonesyncv2 script by cjnaz (https://github.com/cjnaz/rclonesync-V2).
+ NOTE: Requires rclone version 1.48.0 or greater!  This version may NOT be in your distribution's default repository.
+ Please download the latest version from http://rclone.org/downloads/
