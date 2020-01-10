@@ -1,0 +1,4 @@
+#!/bin/bash
+
+#Change permissions of nemorclonesync.py script
+chmod 644 /usr/share/nemo-python/extensions/nemorclonesync.py
