@@ -74,7 +74,7 @@ class AsyncRun(GObject.GObject):
 
 #-----[ Async Execute Command ]-------------------------------------
 class GAsyncSpawn(GObject.GObject):
-    """ GObject class to wrap GLib.spawn_async().
+    """ GObject class to wrap subprocess.Popen().
     
     Use:
         s = GAsyncSpawn()
@@ -93,34 +93,56 @@ class GAsyncSpawn(GObject.GObject):
     def __init__(self):
         GObject.GObject.__init__(self)
 
+        self._is_running = False
+        self._p = None
+        self._stdoutWatch = None
+        self._stderrWatch = None
+
     def run(self, cmd):
+        if self._is_running:
+            raise Exception("Process is already running")
+            return False
+
         #r  = GLib.spawn_async(cmd,flags=GLib.SPAWN_DO_NOT_REAP_CHILD, standard_output=True, standard_error=True)
         #self.pid, idin, idout, iderr = r
         #self.fout = os.fdopen(p.stdout, "r")
         #self.ferr = os.fdopen(p.stderr, "r")
 
         #Open the process with pipes for IO
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self._p = subprocess.Popen(cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 
-        self.pid = p.pid
-        self.fout = p.stdout
-        self.ferr = p.stderr
+        GLib.child_watch_add(self._p.pid,self._on_done)
+        self._stdoutWatch = GLib.io_add_watch(self._p.stdout, GLib.IO_IN, self._on_stdout)
+        self._stderrWatch = GLib.io_add_watch(self._p.stderr, GLib.IO_IN, self._on_stderr)
 
-        GLib.child_watch_add(self.pid,self._on_done)
-        self.foutWatch = GLib.io_add_watch(self.fout, GLib.IO_IN, self._on_stdout)
-        self.ferrWatch = GLib.io_add_watch(self.ferr, GLib.IO_IN, self._on_stderr)
-        return self.pid
+        self._is_running = True
+
+        return True
+
+    def stop(self):
+        if self._is_running:
+            self._p.terminate()
+
+    def kill(self):
+        if self._is_running:
+            self._p.kill()
 
     def _on_done(self, pid, retval, *argv):
         #Ensure that the pipes are closed
-        self.fout.close()
-        self.ferr.close()
+        self._p.stdout.close()
+        self._p.stderr.close()
 
         #These lines were added to prevent high CPU usage after command has exited
-        GLib.source_remove(self.foutWatch)
-        GLib.source_remove(self.ferrWatch)
+        GLib.source_remove(self._stdoutWatch)
+        GLib.source_remove(self._stderrWatch)
 
-        self.emit("process-done", retval)
+        #Cleanup
+        self._is_running = False
+        self._p = None
+        self._stdoutWatch = None
+        self._stderrWatch = None
+
+        self.emit("process-done", retval)     
 
     def _emit_std(self, name, value):
         self.emit(name+"-data", value)
@@ -140,6 +162,9 @@ class GAsyncSpawn(GObject.GObject):
                 line = str(line.decode("utf-8"))
             self._emit_std("stderr", line)
         return True #IO Watch will continue looking for more lines
+
+    def is_running(self):
+        return self._is_running
 
 #-----[ FolderPath ]------------------------------------------------
 
@@ -706,6 +731,89 @@ class RcloneSyncStatusDialog(Gtk.Dialog):
     def on_btnok_pressed(self, widget):
         self.hide()
 
+#-----[ Rclone Config Dialog ]---------------------------------------
+
+
+
+class RcloneConfigDialog(Gtk.Dialog):
+    def __init__(self, parent):
+        Gtk.Dialog.__init__(self, "Configure Rclone", parent, 0)
+
+        self.set_default_size(800, 500)
+
+        #Command spawner
+        self._spawn = GAsyncSpawn()
+        self._spawn.connect("process-done", self._on_process_done)
+        self._spawn.connect("stdout-data", self._on_stdout_data)
+        self._spawn.connect("stderr-data", self._on_stdout_data)
+
+        #Debug output terminal
+        scrolledWindow = Gtk.ScrolledWindow()
+        self.buffer = Gtk.TextBuffer()
+        self.textView = Gtk.TextView(buffer=self.buffer, editable=False, cursor_visible=False, monospace=True)
+        scrolledWindow.add(self.textView)
+
+        #Control buttons
+        boxControls = Gtk.HBox()
+        self.btnStart = Gtk.Button("Start Web GUI", sensitive=True)
+        self.btnStart.connect("pressed", self._on_btnstart_pressed)
+        self.btnStop = Gtk.Button("Stop Web GUI", sensitive=False)
+        self.btnStop.connect("pressed", self._on_btnstop_pressed)
+        boxControls.pack_start(self.btnStart, True, True, 5)
+        boxControls.pack_start(self.btnStop, True, True, 5)
+
+        box = self.get_content_area()
+        box.pack_start(scrolledWindow, True, True, 5)
+        box.pack_start(boxControls, False, True, 5)
+
+        self._btnDone = self.add_button("Done", Gtk.ResponseType.CLOSE)
+
+        self.show_all()
+
+        self._print_line("Rclone can be configured via an integrated web GUI.\nPress the 'Start Web GUI' button to launch this GUI.\nYour web browser should automatically be opened.\nAfter you are done and have closed your web browser, press 'Stop Web GUI'.\n")
+
+    def _print_line(self, line):
+        end_iter = self.buffer.get_end_iter()
+        self.buffer.insert(end_iter, line)
+
+    def _on_btnstart_pressed(self, sender):
+        if self._spawn.is_running():
+            #Ensure the correct buttons are enabled
+            self.btnStart.set_sensitive(False)
+            self.btnStop.set_sensitive(True)
+            return
+
+        cmd = [RCLONE, "rcd", "--rc-web-gui"]
+        self._print_line("RUNNING: " + " ".join(cmd) + "\n\n")
+
+        try:
+            self._spawn.run(cmd)
+
+            self.btnStart.set_sensitive(False)
+            self.btnStop.set_sensitive(True)
+            self._btnDone.set_sensitive(False)
+        except Exception as e:
+            self._print_line("ERROR: " + str(e))
+
+    def _on_btnstop_pressed(self, sender):
+        if not self._spawn.is_running():
+            #Ensure the correct buttons are enabled
+            self.btnStart.set_sensitive(True)
+            self.btnStop.set_sensitive(False)
+            return
+
+        self._spawn.stop()
+    
+    def _on_process_done(self, sender, retval):
+        self._print_line("Process exited with return value " + str(retval) + "\n")
+
+        self.btnStart.set_sensitive(True)
+        self.btnStop.set_sensitive(False)
+        self._btnDone.set_sensitive(True)
+    
+    def _on_stdout_data(self, sender, line):
+        self._print_line(line)
+
 #-----[ Nemo Plugin ]-----------------------------------------------
 class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDescProvider):
     def __init__(self):
@@ -743,6 +851,13 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
 
             #Start a sync using the selected remote
             self.on_sync_requested(None, parent, str(folder), str(path), self.meta_object_cache["first_sync"])
+
+        dialog.destroy()
+        return
+
+    def _on_config_rclone_menuitem_activated(self, menu, parent):
+        dialog = RcloneConfigDialog(parent)
+        resp = dialog.run()
 
         dialog.destroy()
         return
@@ -897,6 +1012,14 @@ class NemoRcloneSyncProvider(GObject.GObject, Nemo.MenuProvider, Nemo.NameAndDes
                                      icon='folder-saved-search')
         sub_menuitem.connect('activate', self.on_menu_other_activated, window, folder_uri)
         submenu.append_item(sub_menuitem)
+
+        #Append the "config rclone" option to the menu
+        config_rclone_menuitem = Nemo.MenuItem(name=PLUGIN_NAME + "::ConfigureRclone",
+                                     label='Configure Rclone...',
+                                     tip='Open the Rclone configuration web GUI',
+                                     icon='preferences-other')
+        config_rclone_menuitem.connect('activate', self._on_config_rclone_menuitem_activated, window)
+        submenu.append_item(config_rclone_menuitem)
 
         return top_menuitem,
 
