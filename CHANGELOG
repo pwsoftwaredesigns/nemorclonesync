@@ -1,3 +1,4 @@
 1.0 - Initial release
 1.1 - Some bug fixes for Python 2/3 cross-compatibility
 1.2 - mkdir and list commands are now executed asynchonously.  A spinner is displayed to indicate "waiting." Fixed a few bugs.
+1.3 - Add rclone configuration web GUI option.  First first_sync bug.
